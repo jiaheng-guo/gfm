@@ -9,8 +9,6 @@ from preprocess import (
     gfm_gallery,
     create_variant_sequences,
     get_grch38_sequence,
-    fetch_snps_in_region,
-    is_clean_dna,
 )
 
 from utils import (
@@ -23,7 +21,7 @@ from utils import (
 
 # Configuration, temporarily defined here. Pay attention to SEQ_LENGTH
 SEQ_START_IDX = 1000000
-SEQ_END_IDX   = 1001000
+SEQ_END_IDX   = 1100000
 SEQ_LENGTH    = 2000
 SEQ_STRIDE    = 1000
 CHROMOSOME_ID = ['1', '2', '3', '4', 'X']
@@ -52,14 +50,11 @@ def exp1(model, tokenizer, device):
 
     - This situation applies to all the 100 sequences we fetched.
 
-    A major flaw is that when we reverse the sequence to simulate a non-member,
-    we actually change the underlying distribution of the sequence, which makes 
+    [NOTE] This is a toy example. A major flaw is that when we reverse the sequence to simulate a non-member, we actually change the underlying distribution of the sequence, which makes 
     the comparison not entirely fair, since the reverse sequence might not belong
     to the same distribution as the original human sequence. We use this experiment
     as a toy example to demonstrate that pure loss-based MIA can work in genomic
     foundation models, but the setting is not ideal.
-
-    [TODO] We need more runs to find a proper perplexity threshold.
     """
     ppx_seq, ppx_seq_rev = [], []
     for i in tqdm(range(100)):
@@ -162,6 +157,19 @@ def exp3(model, tokenizer, device):
 
 ##############################################################
 # ---------------------------------------------------------- #
+# [EXPERIMENT 4] ReCall (EMNLP 2024)
+# ---------------------------------------------------------- #
+##############################################################
+
+def exp4(model, tokenizer, device):
+    """
+    [EXPERIMENT 4] ReCall (EMNLP 2024)
+    To be implemented.
+    """
+    pass
+
+##############################################################
+# ---------------------------------------------------------- #
 # EXPERIMENT EXECUTION
 # ---------------------------------------------------------- #
 ##############################################################
@@ -178,6 +186,7 @@ def main():
     # exp1(model_hyena, tk_hyena, device) # Pure Loss-Based
     # exp2(model_hyena, tk_hyena, device) # Min-k% MIA
     exp3(model_hyena, tk_hyena, device) # Neighborhood Comparison
+    # exp4(model_hyena, tk_hyena, device) # ReCall
 
 if __name__ == "__main__":
     main()

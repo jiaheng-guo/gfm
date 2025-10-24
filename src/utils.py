@@ -110,7 +110,7 @@ def visualize_loss_diff(A: list, B: list, C: list[list], mes: str):
     plt.ylabel("Average Loss")
     plt.title(f"Model Loss on Original & Neighbor Sequences ({mes})")
     plt.legend()
-    plt.savefig(f"./results/loss_comparison_{mes}.png")
+    plt.savefig(f"./static/loss_comparison_{mes}.png")
     plt.show()
 
 
