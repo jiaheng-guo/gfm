@@ -139,10 +139,6 @@ def fetch_snps_in_region(chrom, start, end):
 
     snps = response.json()
 
-    # print(f"Found {len(snps)} SNPs in region {chrom}:{start}-{end}")
-    # for snp in snps[:5]:
-    #     print(f"{snp['id']}  at {snp['start']}  ({snp['alleles']})")
-
     return snps
 
 
@@ -180,7 +176,6 @@ def create_variant_sequences(chrom, start, end, probs):
             f"var_{p}": list(ref_seq) for p in probs
         }
     }
-
     for snp in snps:
         if snp["start"] != snp["end"]:
             continue  # skip non-single-nucleotide SNPs, though this rarely happens

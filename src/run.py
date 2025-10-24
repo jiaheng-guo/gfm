@@ -3,6 +3,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 import torch
 import numpy as np
+import pandas as pd
 
 from preprocess import (
     load_gfm, 
@@ -21,7 +22,7 @@ from utils import (
 
 # Configuration, temporarily defined here. Pay attention to SEQ_LENGTH
 SEQ_START_IDX = 1000000
-SEQ_END_IDX   = 1100000
+SEQ_END_IDX   = 1001000
 SEQ_LENGTH    = 2000
 SEQ_STRIDE    = 1000
 CHROMOSOME_ID = ['1', '2', '3', '4', 'X']
@@ -127,7 +128,6 @@ def exp3(model, tokenizer, device):
     # 'n_a' represents average over all neighbor sequences
     snp_o, snp_n_a, snp_n = [], [], [[] for _ in REPLACE_PROB]
     all_o, all_n_a, all_n = [], [], [[] for _ in REPLACE_PROB]
-    ratio = []
 
     for i in tqdm(range((SEQ_END_IDX - SEQ_START_IDX) // SEQ_STRIDE)):
         for cid in CHROMOSOME_ID:
@@ -140,23 +140,31 @@ def exp3(model, tokenizer, device):
 
             ref_seq = seqs['ref_seq']
             snp_pos = seqs['snp_pos']
-            ratio.append(len(snp_pos) / len(ref_seq))
 
+            snp_o.append(compute_snp_loss_and_perplexity(ref_seq, snp_pos, model, tokenizer, device)[0])
+            all_o.append(compute_loss_and_perplexity(ref_seq, model, tokenizer, device)[0])
+            for p, s, a in zip(REPLACE_PROB, snp_n, all_n):
+                var_seq = seqs['var_seq'][f'var_{p}']
+                s.append(compute_snp_loss_and_perplexity(var_seq, snp_pos, model, tokenizer, device)[0])
+                a.append(compute_loss_and_perplexity(var_seq, model, tokenizer, device)[0])
 
-            # snp_o.append(compute_snp_loss_and_perplexity(ref_seq, snp_pos, model, tokenizer, device)[0])
-            # all_o.append(compute_loss_and_perplexity(ref_seq, model, tokenizer, device)[0])
-            # for p, s, a in zip(REPLACE_PROB, snp_n, all_n):
-            #     var_seq = seqs['var_seq'][f'var_{p}']
-            #     s.append(compute_snp_loss_and_perplexity(var_seq, snp_pos, model, tokenizer, device)[0])
-            #     a.append(compute_loss_and_perplexity(var_seq, model, tokenizer, device)[0])
-
-    # snp_n_a = np.mean(np.array(snp_n), axis=0)
-    # all_n_a = np.mean(np.array(all_n), axis=0)
+    snp_n_a = np.mean(np.array(snp_n), axis=0)
+    all_n_a = np.mean(np.array(all_n), axis=0)
     
-    # visualize_loss_diff(snp_o, snp_n_a, snp_n, mes = "SNP Only")
-    # visualize_loss_diff(all_o, all_n_a, all_n, mes = "All Tokens")
+    visualize_loss_diff(snp_o, snp_n_a, snp_n, mes = "SNP Only")
+    visualize_loss_diff(all_o, all_n_a, all_n, mes = "All Tokens")
+    
+    precision = []
+    all_diff = all_n_a - all_o
+    THRESHOLD_RANGE = np.arange(0, 0.2, 0.01)
+    for t in THRESHOLD_RANGE:
+        precision.append(np.mean(all_diff < t))
+    df = pd.DataFrame({
+        "Threshold": THRESHOLD_RANGE,
+        "Precision": precision
+    })
+    print(df)
 
-    return np.mean(ratio)
     return snp_o, snp_n_a, snp_n, all_o, all_n_a, all_n
 
 ##############################################################
@@ -189,7 +197,7 @@ def main():
 
     # exp1(model_hyena, tk_hyena, device) # Pure Loss-Based
     # exp2(model_hyena, tk_hyena, device) # Min-k% MIA
-    print(exp3(model_hyena, tk_hyena, device)) # Neighborhood Comparison
+    exp3(model_hyena, tk_hyena, device) # Neighborhood Comparison
     # exp4(model_hyena, tk_hyena, device) # ReCall
 
 if __name__ == "__main__":

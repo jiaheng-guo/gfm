@@ -24,10 +24,10 @@ Given a sequence of confirmed training-set membership, we construct its neighbor
 - number of neighbor sequences per original sequence: 3 (60%, 80%, 100% SNP replacement)
 - length of each sequence: 2000 base pairs
 - grey curves: loss on individual neighbor; blue curve: average loss on neighbors; red curve: loss on original sequence.
-- average ratio of SNP positions in each sequence: 4.5%
+- average ratio of SNP positions in each sequence: 41.33%
 
 ![](./static/loss_comparison_All_Tokens_huge.png)
 
 ![](./static/loss_comparison_SNP_Only_huge.png)
 
-If we consider only model's loss on SNP positions, the difference between original sequences and their neighbors becomes very obscure, while if we consider loss on all tokens, the difference is much more obvious. By setting a proper threshold on the loss on all tokens, we can achieve a good membership inference performance.
+If we consider only model's loss on SNP positions, the difference between original sequences and their neighbors becomes very obscure, while if we consider loss on all tokens, the difference is much more obvious. By setting a proper threshold on the loss difference on all tokens, we can achieve a good membership inference performance. The following figure shows the precision score under different thresholds:
