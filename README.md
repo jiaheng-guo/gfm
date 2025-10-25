@@ -10,7 +10,7 @@ We conduct experiments to evaluate the privacy leakage of genomic foundation mod
 
 ### Setup
 
-Target Model: HyenaDNA
+Target Model: HyenaDNA (logits available)
 
 GPU: NVIDIA A100-SXM4-40GB  
 
@@ -34,7 +34,7 @@ The following figure uses 3 as the number of neighbor sequences per original seq
 
 If we consider only model's loss on SNP positions, the difference between original sequences and their neighbors becomes very obscure, while if we consider loss on all tokens, the difference is much more obvious. By setting a proper threshold on the loss difference on all tokens, we can achieve a good membership inference performance. The following figure shows the precision score under different thresholds (for the 10%-20%-30% SNP replacements setting):
 
-| Threshold | Precision |
+| Loss Diff Threshold | Precision Score|
 |------------|------------|
 | 0.00 | 0.000 |
 | 0.01 | 0.000 |
