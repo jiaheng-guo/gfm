@@ -151,8 +151,8 @@ def exp3(model, tokenizer, device):
     snp_n_a = np.mean(np.array(snp_n), axis=0)
     all_n_a = np.mean(np.array(all_n), axis=0)
     
-    visualize_loss_diff(snp_o, snp_n_a, snp_n, mes = "SNP Only")
-    visualize_loss_diff(all_o, all_n_a, all_n, mes = "All Tokens")
+    visualize_loss_diff(snp_o, snp_n_a, snp_n, mes = "SNP_Only")
+    visualize_loss_diff(all_o, all_n_a, all_n, mes = "All_Tokens")
     
     precision = []
     all_diff = all_n_a - all_o
