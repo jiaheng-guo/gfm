@@ -184,9 +184,9 @@ def create_variant_sequences(chrom, start, end, probs):
 
         alleles = snp.get("alleles", [])
         if len(alleles) == 0 or len(alleles) == 1:
-            continue  # malformed record
+            continue  # malformed record, though rarely happens
         res["snp_pos"].append(pos)
-
+    
         alts = alleles[1:]
         for p in probs:
             if random.random() <= p:
