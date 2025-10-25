@@ -21,7 +21,7 @@ GPU: NVIDIA A100-SXM4-40GB
 Given a sequence of confirmed training-set membership, we construct its neighbors by changing the nucleotides at SNP positions (we obtain these locations from dbSNP database and align them with the reference genome), of a certain replacement probability (we used 60%, 80%, and 100% in our experiments). We then compute the average loss of the original sequence and its neighbors under the target GFM, the results are shown below:
 
 Hyperconfigs:
-- number of original sequences: 500
+- number of original sequences: 500 (sequences at fixed indices in chromosome 1, 2, 3, 4, X)
 - length of each sequence: 2000 base pairs
 - grey curves: loss on individual neighbor; blue curve: average loss on neighbors; red curve: loss on original sequence.
 - average ratio of SNP positions in each sequence: 41.33%
