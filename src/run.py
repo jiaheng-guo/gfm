@@ -1,6 +1,4 @@
-from datasets import Dataset
 from tqdm import tqdm
-import torch.nn.functional as F
 import torch
 import numpy as np
 import pandas as pd
@@ -9,7 +7,7 @@ from preprocess import (
     load_gfm, 
     gfm_gallery,
     create_variant_sequences,
-    get_grch38_sequence,
+    fetch_grch38_sequence,
 )
 
 from utils import (
@@ -61,7 +59,7 @@ def exp1(model, tokenizer, device):
     for i in tqdm(range(100)):
         start_idx = 1000000 + 10000 * i # NOTE: make sure idx lie within valid boundary
 
-        seq = get_grch38_sequence('X', start_idx, start_idx + 10**(3 + i % 2))
+        seq = fetch_grch38_sequence('X', start_idx, start_idx + 10**(3 + i % 2))
         seq_rev = seq[::-1] # reverse to simulate non-member, but change underlying distribution
         # blast_search_grch38(seq) # temporarily comment out cuz it costs too much time
 
@@ -89,7 +87,7 @@ def exp2(model, tokenizer, device):
     for i in tqdm(range(100)):
         start_idx = 1000000 + 10000 * i # NOTE: make sure idx lie within boundary
 
-        seq = get_grch38_sequence('X', start_idx, start_idx + 10**(3 + i % 2))
+        seq = fetch_grch38_sequence('X', start_idx, start_idx + 10**(3 + i % 2))
         seq_rev = seq[::-1]
         # blast_search_grch38(seq) # temporarily comment out cuz it costs too much time
 

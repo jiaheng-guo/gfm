@@ -1,18 +1,10 @@
 from transformers import AutoModelForCausalLM, AutoModelForMaskedLM, AutoTokenizer
-from datasets import Dataset
-from tqdm import tqdm
-import torch.nn.functional as F
-import torch
 import requests
 import random
-import numpy as np
-
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 ###############################################################
 # ----------------------------------------------------------- #
-# GFM LOADER
+# [GFM] MODEL LOADER
 # ----------------------------------------------------------- #
 ###############################################################
 
@@ -61,33 +53,45 @@ gfm_gallery = {
 
 ###############################################################
 # ----------------------------------------------------------- #
-# REF SEQ FETCHER & VERIFIER
+# [GENOMIC SEQUENCE] SEQ FETCHER & VERIFIER
 # ----------------------------------------------------------- #
 ###############################################################
 
 """
-[GRCh38 Sequence Fetcher] and [GRCh38 Sequence Verifier]
-
-[GRCh38 sequence fetcher]
+[Sequence fetchers]
+-------------------
 We use the Ensembl website, https://rest.ensembl.org/, to fetch genonic
-sequences in mainstream genomic databases (used by the GFMs) including
+sequences in mainstream genomic databases including
   - GRCh38 (for HyenaDNA),
-  - RefSeq (for GENERator), and
-  - 1kG (for nucleotide transformer).
+  - T2T-CHM13v2.0 (not used in any GFM, fetched for MIA analysis purpose)
 
-[GRCh38 sequence verifier]
+[Sequence verifiers]
+--------------------
 We use the BLAST module in the Biopython package for verifying if a given
 sequence is in the GRCh38 dataset, or if there is any similar sequences
 (with more than 80% similar subsequences). The Doc of the BLAST module and
 biopython can be found at: https://biopython.org/docs/latest/Tutorial/.
 """
 
-def get_grch38_sequence(chromosome, start, end) -> str:
+def fetch_grch38_sequence(chromosome, start, end) -> str:
     """
-    Ensembl human reference gene (GRCh38) fetcher.
-    HyenaDNA was trained on this dataset.
+    Human reference genome (GRCh38) fetcher using Ensembl REST API.
 
-    Output: <str> raw nucleotide sequence.
+    [Note] HyenaDNA was trained on this dataset.
+
+    Parameters:
+    ----------
+    chromosome : str
+        Chromosome name (e.g., "1", "X").
+    start : int
+        1-based start coordinate of region.
+    end : int
+        1-based end coordinate of region (inclusive).
+
+    Returns
+    -------
+    sequence : str
+        raw nucleotide sequence.
     """
 
     server = "https://rest.ensembl.org/"
@@ -110,8 +114,58 @@ def get_grch38_sequence(chromosome, start, end) -> str:
         print(f"Error: {e}")
         return None
     
+
+def fetch_t2t_sequence(chrom: str, start: int, end: int,
+                     assembly: str = "t2t-chm13v2.0",
+                     species: str = "homo_sapiens",
+                     strand: int = 1) -> str:
+    """
+    Human genome (T2T-CHM13v2.0) fetcher using Ensembl REST API.
+    
+    Parameters:
+    ----------
+    chrom : str
+        Chromosome name (e.g., "chr1", "chrX").
+    start : int
+        1-based start coordinate of region.
+    end : int
+        1-based end coordinate of region (inclusive).
+    assembly : str
+        Assembly name (default "t2t-chm13v2.0").
+    species : str
+        Species name (default "homo_sapiens").
+    strand : int
+        Strand (1 for forward, -1 for reverse).
+
+    Returns:
+    -------
+    sequence : str
+        The DNA sequence string of the requested region.
+    """
+
+    server = "https://rest.ensembl.org"
+
+    ext = f"/sequence/region/{species}/{chrom}:{start}..{end}:{strand}"
+
+    headers = {
+        "content-type": "application/json",
+        "assembly_name": assembly
+    }
+
+    response = requests.get(server + ext, params=headers)
+    if not response.ok:
+        raise RuntimeError(f"Error {response.status_code}: {response.text}")
+    data = response.json()
+
+    seq = data.get("seq")
+    if seq is None:
+        raise RuntimeError("No sequence returned in response.")
+    return seq
+
+
 def verify_grch38_membership(sequence) -> bool:
     raise NotImplementedError("BLAST service too time-consuming")
+
 
 def is_clean_dna(seq):
     """
@@ -123,7 +177,7 @@ def is_clean_dna(seq):
 
 ###############################################################
 # ----------------------------------------------------------- #
-# SNP INFO FETCHER & VARIANT SEQUENCE CREATOR
+# [SNP] SNP INFO FETCHER & VARIANT SEQUENCE CREATOR
 # ----------------------------------------------------------- #
 ###############################################################
 
@@ -164,7 +218,7 @@ def create_variant_sequences(chrom, start, end, probs):
         Dictionary mapping {variant_name: variant_sequence}
     """
 
-    ref_seq = get_grch38_sequence(chrom, start, end)
+    ref_seq = fetch_grch38_sequence(chrom, start, end)
     if ref_seq is None or not is_clean_dna(ref_seq):
         return None
 

@@ -56,3 +56,12 @@ If we consider only model's loss on SNP positions, the difference between origin
 | 0.17 | 0.840 |
 | 0.18 | 0.854 |
 | 0.19 | 0.870 |
+
+## TODO
+
+- more attack methods, settings, target models
+- test on non-member data
+- threshold selection
+- attack and defense
+- before Jan. 2026
+- slides
