@@ -14,6 +14,16 @@ Target Model: HyenaDNA (logits available)
 
 GPU: NVIDIA A100-SXM4-40GB  
 
+### Code Structure
+
+- src/:
+  - preprocess.py: genomic data preprocessing functions
+  - utils.py: non-genomic utility functions
+  - run.py: main attack implementations
+  - eval.py: evaluation functions
+- data/: genomic data files
+- static/: figures for README and result visualizations
+
 ### Numerical Results
 
 #### Neighborhood Comparison

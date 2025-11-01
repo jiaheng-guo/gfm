@@ -4,10 +4,9 @@ import numpy as np
 import pandas as pd
 
 from preprocess import (
-    load_gfm, 
-    gfm_gallery,
+    load_gfm_to_device, 
     create_variant_sequences,
-    fetch_grch38_sequence,
+    fetch_grch38_region,
 )
 
 from utils import (
@@ -20,11 +19,12 @@ from utils import (
 
 # Configuration, temporarily defined here. Pay attention to SEQ_LENGTH
 SEQ_START_IDX = 1000000
-SEQ_END_IDX   = 1001000
+SEQ_END_IDX   = 1200000
 SEQ_LENGTH    = 2000
 SEQ_STRIDE    = 1000
-CHROMOSOME_ID = ['1', '2', '3', '4', 'X']
-REPLACE_PROB  = [0.6, 0.8, 1.0]
+CHROMOSOME_ID = ['1']
+REPLACE_PROB  = [0.1, 0.2, 0.3]
+REPLACE_PROB_2 = [0.3, 0.4, 0.5]
 
 ##############################################################
 # ---------------------------------------------------------- #
@@ -59,7 +59,7 @@ def exp1(model, tokenizer, device):
     for i in tqdm(range(100)):
         start_idx = 1000000 + 10000 * i # NOTE: make sure idx lie within valid boundary
 
-        seq = fetch_grch38_sequence('X', start_idx, start_idx + 10**(3 + i % 2))
+        seq = fetch_grch38_region('X', start_idx, start_idx + 10**(3 + i % 2))
         seq_rev = seq[::-1] # reverse to simulate non-member, but change underlying distribution
         # blast_search_grch38(seq) # temporarily comment out cuz it costs too much time
 
@@ -87,7 +87,7 @@ def exp2(model, tokenizer, device):
     for i in tqdm(range(100)):
         start_idx = 1000000 + 10000 * i # NOTE: make sure idx lie within boundary
 
-        seq = fetch_grch38_sequence('X', start_idx, start_idx + 10**(3 + i % 2))
+        seq = fetch_grch38_region('X', start_idx, start_idx + 10**(3 + i % 2))
         seq_rev = seq[::-1]
         # blast_search_grch38(seq) # temporarily comment out cuz it costs too much time
 
@@ -108,7 +108,8 @@ def exp2(model, tokenizer, device):
 
 def exp3(model, tokenizer, device):
     """
-    [EXPERIMENT 3] Neighborhood comparison (Mattern et al. 2023)
+    - Target model: HyenaDNA
+    - Training data: Human reference genome (GRCh38)
 
     Generate neighbors using SNP annotations. For each sequence fetched from GRCh38,
     we create different kinds of neighboring sequences by randomly replacing a certain percentage
@@ -121,49 +122,62 @@ def exp3(model, tokenizer, device):
     2) Loss/Perplexity on all tokens
     """
 
-    # loss lists, postfix 'o' represents original sequence, 'n' represents neighbor sequences
-    # prefix 'snp' represents loss on SNP-affected tokens only, 'all' represents loss on all tokens
-    # 'n_a' represents average over all neighbor sequences
-    snp_o, snp_n_a, snp_n = [], [], [[] for _ in REPLACE_PROB]
-    all_o, all_n_a, all_n = [], [], [[] for _ in REPLACE_PROB]
+    SEQ_NUM = (SEQ_END_IDX - SEQ_START_IDX) // SEQ_STRIDE
 
-    for i in tqdm(range((SEQ_END_IDX - SEQ_START_IDX) // SEQ_STRIDE)):
-        for cid in CHROMOSOME_ID:
-            start_idx = SEQ_START_IDX + i * SEQ_STRIDE
-            end_idx   = start_idx + SEQ_LENGTH
+    def _process(tqdm_mes, ds, sn, rp, v_bool=True):
+        # loss lists, postfix 'o' represents original sequence, 'n' represents neighbor sequences
+        # prefix 'snp' represents loss on SNP-affected tokens only, 'all' represents loss on all
+        # tokens, 'n_a' represents average over all neighbor sequences
+        snp_o, snp_n_a, snp_n = [], [], [[] for _ in rp]
+        all_o, all_n_a, all_n = [], [], [[] for _ in rp]
 
-            seqs = create_variant_sequences(cid, start_idx, end_idx, REPLACE_PROB)
-            if seqs is None:
-                continue
+        for i in tqdm(range(SEQ_NUM), desc=tqdm_mes):
+            for cid in CHROMOSOME_ID:
+                start_idx = SEQ_START_IDX + i * SEQ_STRIDE
+                end_idx   = start_idx + SEQ_LENGTH
 
-            ref_seq = seqs['ref_seq']
-            snp_pos = seqs['snp_pos']
+                seqs = create_variant_sequences(cid, start_idx, end_idx, rp, dataset=ds, sample=sn)
+                if seqs is None:
+                    continue
 
-            snp_o.append(compute_snp_loss_and_perplexity(ref_seq, snp_pos, model, tokenizer, device)[0])
-            all_o.append(compute_loss_and_perplexity(ref_seq, model, tokenizer, device)[0])
-            for p, s, a in zip(REPLACE_PROB, snp_n, all_n):
-                var_seq = seqs['var_seq'][f'var_{p}']
-                s.append(compute_snp_loss_and_perplexity(var_seq, snp_pos, model, tokenizer, device)[0])
-                a.append(compute_loss_and_perplexity(var_seq, model, tokenizer, device)[0])
+                ref_seq = seqs['ref_seq']
+                snp_pos = seqs['snp_pos']
 
-    snp_n_a = np.mean(np.array(snp_n), axis=0)
-    all_n_a = np.mean(np.array(all_n), axis=0)
-    
-    visualize_loss_diff(snp_o, snp_n_a, snp_n, mes = "SNP_Only")
-    visualize_loss_diff(all_o, all_n_a, all_n, mes = "All_Tokens")
-    
-    precision = []
-    all_diff = all_n_a - all_o
-    THRESHOLD_RANGE = np.arange(0, 0.2, 0.01)
-    for t in THRESHOLD_RANGE:
-        precision.append(np.mean(all_diff < t))
-    df = pd.DataFrame({
-        "Threshold": THRESHOLD_RANGE,
-        "Precision": precision
-    })
-    print(df)
+                snp_o.append(compute_snp_loss_and_perplexity(ref_seq, snp_pos, model, tokenizer, device)[0])
+                all_o.append(compute_loss_and_perplexity(ref_seq, model, tokenizer, device)[0])
+                for p, s, a in zip(rp, snp_n, all_n):
+                    var_seq = seqs['var_seq'][f'var_{p}']
+                    s.append(compute_snp_loss_and_perplexity(var_seq, snp_pos, model, tokenizer, device)[0])
+                    a.append(compute_loss_and_perplexity(var_seq, model, tokenizer, device)[0])
+        
+        snp_n_a = np.mean(np.array(snp_n), axis=0)
+        all_n_a = np.mean(np.array(all_n), axis=0)
 
-    return snp_o, snp_n_a, snp_n, all_o, all_n_a, all_n
+        if v_bool:
+            visualize_loss_diff(snp_o, snp_n_a, snp_n, mes = "SNP_Only")
+            visualize_loss_diff(all_o, all_n_a, all_n, mes = "All_Tokens")
+
+        return snp_o, snp_n_a, snp_n, all_o, all_n_a, all_n
+
+    # _, _, _, mall_o, mall_n_a, _ = _process("Processing members", 'grch38', None, REPLACE_PROB)
+    # _, _, _, nall_o1, nall_n_a1, _ = _process("Evaluating non-members", 'vcf', "HG00096", REPLACE_PROB)
+    # _, _, _, nall_o2, nall_n_a2, _ = _process("Evaluating non-members", 'vcf', "HG00097", REPLACE_PROB)
+
+    _, _, _, small_o, small_n_a, _ = _process("Processing members", 'grch38', None, REPLACE_PROB_2)
+    _, _, _, snpall_o1, snpall_n_a1, _ = _process("Evaluating non-members", 'vcf', "HG00096", REPLACE_PROB_2)
+    _, _, _, snpall_o2, snpall_n_a2, _ = _process("Evaluating non-members", 'vcf', "HG00097", REPLACE_PROB_2)
+
+    # precision = []
+    # all_diff = mall_n_a - mall_o
+    # THRESHOLD_RANGE = np.arange(np.percentile(all_diff, 5), np.percentile(all_diff, 95), 0.01)
+    # for t in THRESHOLD_RANGE:
+    #     precision.append(np.mean(all_diff < t))
+    # df = pd.DataFrame({
+    #     "Threshold": THRESHOLD_RANGE,
+    #     "Precision": precision
+    # })
+    # print(df)
+
 
 ##############################################################
 # ---------------------------------------------------------- #
@@ -187,11 +201,9 @@ def exp4(model, tokenizer, device):
 def main():
     fix_seed(42)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    _device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'
-    print("[STATUS] Using device:", _device_name)
-    
-    model_hyena, tk_hyena = load_gfm(gfm_gallery['hyenadna'])
-    model_hyena = model_hyena.to(device)
+    print(f"[STATUS] Using {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
+
+    model_hyena, tk_hyena = load_gfm_to_device('hyenadna', device)
 
     # exp1(model_hyena, tk_hyena, device) # Pure Loss-Based
     # exp2(model_hyena, tk_hyena, device) # Min-k% MIA

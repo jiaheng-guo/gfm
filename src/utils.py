@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 import random
 import numpy as np
+import time
 
 def fix_seed(seed: int = 42):
     random.seed(seed)
@@ -13,11 +14,11 @@ def fix_seed(seed: int = 42):
 
 ##############################################################
 # ---------------------------------------------------------- #
-# LOSS COMPUTATION
+# SCORE COMPUTATION
 # ---------------------------------------------------------- #
 ##############################################################
 
-def compute_loss_and_perplexity(sequence, model, tokenizer, device):
+def compute_loss_and_perplexity(seq, model, tokenizer, device):
     """
     Returns
     -------
@@ -26,14 +27,16 @@ def compute_loss_and_perplexity(sequence, model, tokenizer, device):
     """
     model.eval()
 
-    inputs = tokenizer(sequence, return_tensors="pt", truncation=True).to(device)
+    inputs = tokenizer(seq, return_tensors="pt", truncation=True).to(device)
 
     with torch.no_grad():
         outputs = model(**inputs, labels=inputs["input_ids"])
         loss = outputs.loss
-        perplexity = torch.exp(loss)
+        # perplexity = torch.exp(loss)
 
+    return loss.item(), None
     return loss.item(), perplexity.item()
+
 
 def compute_snp_loss_and_perplexity(seq, snp_index, model, tokenizer, device):
     """
@@ -93,6 +96,7 @@ def store_results_to_txt(results, filepath):
         for item in results:
             f.write(f"{item}\n")
 
+
 def visualize_loss_diff(A: list, B: list, C: list[list], mes: str):
     plt.figure(figsize=(12, 6))
     x = range(len(A))
@@ -107,13 +111,13 @@ def visualize_loss_diff(A: list, B: list, C: list[list], mes: str):
     plt.ylabel("Average Loss")
     plt.title(f"Model Loss on Original & Neighbor Sequences ({mes})")
     plt.legend()
-    plt.savefig(f"./static/loss_comparison_{mes}.png")
+    plt.savefig(f"./static/lc_{mes}_{int(time.time())}.png")
     plt.show()
 
 
 ##############################################################
 # ---------------------------------------------------------- #
-# DECREPCATED FUNCTIONS (MIGHT BE USEFUL LATER)
+# DEPRECATED FUNCTIONS (MIGHT BE REUSED LATER)
 # ---------------------------------------------------------- #
 ##############################################################
 
@@ -147,47 +151,13 @@ def compute_filtered_perplexity(sequence, model, tokenizer, device, threshold=0.
     return filtered_perplexity.item()
 
 
-def compute_filtered_loglikelihood(sequence, model, tokenizer, device, threshold=0.2):
-    """
-    Compute the filtered log-likelihood of a sequence under the given model.
-
-    [NOTE] Similar to generate_neighbors, this function is deprecated due to unsatisfactory
-    results in experiments.
-    """
-    model.eval()
-    inputs = tokenizer(sequence, return_tensors="pt", truncation=True).to(device)
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-        logits = outputs.logits
-        labels = inputs["input_ids"]
-
-        shift_logits = logits[:, :-1, :]
-        shift_labels = labels[:, 1:]
-
-        log_probs = F.log_softmax(shift_logits, dim=-1)
-        probs = torch.exp(log_probs)
-
-        true_probs = probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
-        mask = true_probs < threshold
-
-        nll = -log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
-
-        if mask.sum() > 0:
-            filtered_nll = (nll * mask).sum() / mask.sum()
-        else:
-            filtered_nll = nll.mean()
-
-    return filtered_nll.item()
-
-
 def generate_neighbors(sequence, mlm, tokenizer, device, k=0.1):
     """
     Randomly mask k% of tokens in sequence and replace with top-1 MLM predictions.
-    
-    [NOTE] This function is decrepcated due to unsatisfactory results in experiments.
+
+    [NOTE] This function is DEPRECATED due to unsatisfactory results in experiments.
     The reason is that the randomly masked tokens may not correspond to actual SNP locations,
-    and may be just random, non-geneic regions with no functionality. Thus, we have converted
+    and may be just random, non-genetic regions with no functionality. Thus, we have converted
     to SNP-based neighbor generation in our main experiments.
 
     Args
@@ -231,3 +201,37 @@ def generate_neighbors(sequence, mlm, tokenizer, device, k=0.1):
 
     neighbor_seq = tokenizer.decode(input_ids[0], skip_special_tokens=True)
     return neighbor_seq
+
+
+def compute_filtered_loglikelihood(sequence, model, tokenizer, device, threshold=0.2):
+    """
+    Compute the filtered log-likelihood of a sequence under the given model.
+
+    [NOTE] Similar to generate_neighbors, this function is DEPRECATED due to unsatisfactory
+    results in experiments.
+    """
+    model.eval()
+    inputs = tokenizer(sequence, return_tensors="pt", truncation=True).to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits
+        labels = inputs["input_ids"]
+
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+
+        log_probs = F.log_softmax(shift_logits, dim=-1)
+        probs = torch.exp(log_probs)
+
+        true_probs = probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
+        mask = true_probs < threshold
+
+        nll = -log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+        if mask.sum() > 0:
+            filtered_nll = (nll * mask).sum() / mask.sum()
+        else:
+            filtered_nll = nll.mean()
+
+    return filtered_nll.item()

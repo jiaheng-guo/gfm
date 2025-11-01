@@ -1,6 +1,7 @@
 from transformers import AutoModelForCausalLM, AutoModelForMaskedLM, AutoTokenizer
 import requests
 import random
+import pysam
 
 ###############################################################
 # ----------------------------------------------------------- #
@@ -8,48 +9,90 @@ import random
 # ----------------------------------------------------------- #
 ###############################################################
 
-"""
-[GFM loader]
+def load_gfm_to_device(model_name, device) -> tuple:
+    """
+    At the early stage, we only consider 3 GFMs with best performances:
+    HyenaDNA, GENERator, and Nucleotide Transformer (NT). A detailed introduction
+    can be found on the 9/28 Progress Report. Two things worth mentioning are that
+    (1) HyenaDNA and GENERator are decoder-only, while NT is encoder-only;
+    (2) The pre-training dataset of
+          (i) HyenaDNA is GRCh38,
+         (ii) GENERator is RefSeq, and
+        (iii) Nucleotide Transformer is 1kG.
 
-At the early stage, we only consider 3 GFMs with best performances:
-HyenaDNA, GENERator, and Nucleotide Transformer (NT). A detailed introduction
-can be found on the 9/28 Progress Report. Two things worth mentioning are that
+    Parameters:
+    ----------
+    model_name : str
+        The name of the model to load (e.g., "hyenadna").
+    device : str
+        The device to load the model onto.
 
-(1) HyenaDNA and GENERator are decoder-only, while NT is encoder-only;
+    Returns:
+    -------
+    A tuple containing the loaded model and tokenizer.
+    """
+    gfm_gallery = {
+        'hyenadna':    ('LongSafari/hyenadna-medium-450k-seqlen-hf', 'NTP'),
+        'generator':   ('GenerTeam/GENERator-eukaryote-1.2b-base', 'NTP'),
+        'nucleotideT': ('InstaDeepAI/nucleotide-transformer-500m-human-ref', 'MLM'),
+        'dnabert2':    ('zhihan1996/DNABERT-2-117M', 'MLM'),
+    }
+    if model_name not in gfm_gallery:
+        raise ValueError(f"Model {model_name} not found in gallery.")
+    checkpoint = gfm_gallery[model_name]
 
-(2) The pre-training dataset of
-      (i) HyenaDNA is GRCh38,
-     (ii) GENERator is RefSeq, and
-    (iii) Nucleotide Transformer is 1kG.
-
-Later we will define functions that processes these datasets.
-"""
-
-def load_gfm(check_point: tuple) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
     tokenizer = AutoTokenizer.from_pretrained(
-        check_point[0],
+        checkpoint[0],
         trust_remote_code=True
     )
 
-    if check_point[1] == 'NTP':
+    if checkpoint[1] == 'NTP':
         model = AutoModelForCausalLM.from_pretrained(
-            check_point[0],
+            checkpoint[0],
             trust_remote_code=True
         )
     else: # assuming 'MLM'
         model = AutoModelForMaskedLM.from_pretrained(
-            check_point[0],
+            checkpoint[0],
             trust_remote_code=True
         )
 
-    return model, tokenizer
+    LM_module = AutoModelForCausalLM if checkpoint[1] == 'NTP' else AutoModelForMaskedLM
+    model = LM_module.from_pretrained(
+        checkpoint[0],
+        trust_remote_code=True
+    )
 
-gfm_gallery = {
-    'hyenadna':    ('LongSafari/hyenadna-medium-450k-seqlen-hf', 'NTP'),
-    'generator':   ('GenerTeam/GENERator-eukaryote-1.2b-base', 'NTP'),
-    'nucleotideT': ('InstaDeepAI/nucleotide-transformer-500m-human-ref', 'MLM'),
-    # 'dnabert2':    ('zhihan1996/DNABERT-2-117M', 'MLM'), # Temporarily commented out
-}
+    return model.to(device), tokenizer
+
+
+###############################################################
+# ----------------------------------------------------------- #
+# VCF FILES HANDLER
+# ----------------------------------------------------------- #
+###############################################################
+
+def reconstruct_sequence(chrom, start, end, sample, vcf_path, ref_path):
+    vcf = pysam.VariantFile(vcf_path)
+    ref = pysam.FastaFile(ref_path)
+    
+    # convert 1-based to 0-based for pysam
+    seq = list(ref.fetch(chrom, start-1, end))  
+
+    for rec in vcf.fetch(chrom, start, end):
+        if sample not in rec.samples:
+            continue
+        gt = rec.samples[sample]["GT"]
+        if gt is None:
+            continue
+        # simple consensus: apply ALT if present in any haplotype
+        if 1 in gt:
+            pos = rec.pos - start  # VCF 1-based
+            if 0 <= pos < len(seq):
+                if len(rec.alts[0]) == 1: # do not consider SNP alleles with length != 1
+                    seq[pos] = rec.alts[0]
+    return "".join(seq)
+
 
 ###############################################################
 # ----------------------------------------------------------- #
@@ -58,6 +101,8 @@ gfm_gallery = {
 ###############################################################
 
 """
+In this section, we define the following two kinds of modules:
+
 [Sequence fetchers]
 -------------------
 We use the Ensembl website, https://rest.ensembl.org/, to fetch genonic
@@ -73,7 +118,7 @@ sequence is in the GRCh38 dataset, or if there is any similar sequences
 biopython can be found at: https://biopython.org/docs/latest/Tutorial/.
 """
 
-def fetch_grch38_sequence(chromosome, start, end) -> str:
+def fetch_grch38_region(chrom, start, end) -> str:
     """
     Human reference genome (GRCh38) fetcher using Ensembl REST API.
 
@@ -96,7 +141,7 @@ def fetch_grch38_sequence(chromosome, start, end) -> str:
 
     server = "https://rest.ensembl.org/"
 
-    ext = f"/sequence/region/human/{chromosome}:{start}..{end}:1?"
+    ext = f"/sequence/region/human/{chrom}:{start}..{end}:1?"
 
     ver = "coord_system_version=GRCh38"
 
@@ -115,59 +160,11 @@ def fetch_grch38_sequence(chromosome, start, end) -> str:
         return None
     
 
-def fetch_t2t_sequence(chrom: str, start: int, end: int,
-                     assembly: str = "t2t-chm13v2.0",
-                     species: str = "homo_sapiens",
-                     strand: int = 1) -> str:
-    """
-    Human genome (T2T-CHM13v2.0) fetcher using Ensembl REST API.
-    
-    Parameters:
-    ----------
-    chrom : str
-        Chromosome name (e.g., "chr1", "chrX").
-    start : int
-        1-based start coordinate of region.
-    end : int
-        1-based end coordinate of region (inclusive).
-    assembly : str
-        Assembly name (default "t2t-chm13v2.0").
-    species : str
-        Species name (default "homo_sapiens").
-    strand : int
-        Strand (1 for forward, -1 for reverse).
-
-    Returns:
-    -------
-    sequence : str
-        The DNA sequence string of the requested region.
-    """
-
-    server = "https://rest.ensembl.org"
-
-    ext = f"/sequence/region/{species}/{chrom}:{start}..{end}:{strand}"
-
-    headers = {
-        "content-type": "application/json",
-        "assembly_name": assembly
-    }
-
-    response = requests.get(server + ext, params=headers)
-    if not response.ok:
-        raise RuntimeError(f"Error {response.status_code}: {response.text}")
-    data = response.json()
-
-    seq = data.get("seq")
-    if seq is None:
-        raise RuntimeError("No sequence returned in response.")
-    return seq
-
-
-def verify_grch38_membership(sequence) -> bool:
+def verify_grch38_membership(seq: str) -> bool:
     raise NotImplementedError("BLAST service too time-consuming")
 
 
-def is_clean_dna(seq):
+def is_clean_dna(seq: str):
     """
     Verify if a sequence only contains A, T, C, G.
     """
@@ -180,6 +177,10 @@ def is_clean_dna(seq):
 # [SNP] SNP INFO FETCHER & VARIANT SEQUENCE CREATOR
 # ----------------------------------------------------------- #
 ###############################################################
+
+"""
+In this section, we define modules to deal with SNPs.
+"""
 
 def fetch_snps_in_region(chrom, start, end):
     """
@@ -196,7 +197,7 @@ def fetch_snps_in_region(chrom, start, end):
     return snps
 
 
-def create_variant_sequences(chrom, start, end, probs):
+def create_variant_sequences(chrom, start, end, probs, dataset='grch38', sample="HG00096"):
     """
     Given a reference DNA sequence and SNP annotations (from fetch_snps_in_region),
     manually create variant sequences by substituting alternate alleles.
@@ -209,7 +210,7 @@ def create_variant_sequences(chrom, start, end, probs):
         The genomic coordinate of the first base of ref_seq (1-based)
     snps : list
         List of SNP records returned by fetch_snps_in_region()
-    precents : iterable
+    probs : iterable
         List of fractions of SNPs to replace (e.g., [0.3, 0.4, 0.5])
 
     Returns
@@ -218,7 +219,20 @@ def create_variant_sequences(chrom, start, end, probs):
         Dictionary mapping {variant_name: variant_sequence}
     """
 
-    ref_seq = fetch_grch38_sequence(chrom, start, end)
+    if dataset.lower() == 'grch38':
+        ref_seq = fetch_grch38_region(chrom, start, end)
+    elif dataset.lower() == 'vcf':
+        ref_seq = reconstruct_sequence(
+            chrom, 
+            start, 
+            end, 
+            sample,
+            vcf_path="./data/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz",
+            ref_path="./data/Homo_sapiens.GRCh38.dna.chromosome.1.fa"
+        )
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
     if ref_seq is None or not is_clean_dna(ref_seq):
         return None
 
@@ -238,7 +252,7 @@ def create_variant_sequences(chrom, start, end, probs):
 
         alleles = snp.get("alleles", [])
         if len(alleles) == 0 or len(alleles) == 1:
-            continue  # malformed record, though rarely happens
+            continue  # malformed record, though this rarely happens
         res["snp_pos"].append(pos)
     
         alts = alleles[1:]
