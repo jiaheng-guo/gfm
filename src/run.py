@@ -19,13 +19,23 @@ from utils import (
 
 # Configuration, temporarily defined here. Pay attention to SEQ_LENGTH
 SEQ_START_IDX = 1000000
-SEQ_END_IDX   = 1200000
+SEQ_END_IDX   = 1050000
 SEQ_LENGTH    = 2000
 SEQ_STRIDE    = 1000
 CHROMOSOME_ID = ['1']
 REPLACE_PROB  = [0.1, 0.2, 0.3]
 REPLACE_PROB_2 = [0.3, 0.4, 0.5]
 
+##############################################################
+# ---------------------------------------------------------- #
+# [EXPERIMENT 0] Illustration of model output logits
+# ---------------------------------------------------------- #
+##############################################################
+
+def exp0(model, tokenizer, device):
+    """
+    pass
+    """
 ##############################################################
 # ---------------------------------------------------------- #
 # [EXPERIMENT 1] Pure Loss-Based MIA
@@ -159,9 +169,9 @@ def exp3(model, tokenizer, device):
 
         return snp_o, snp_n_a, snp_n, all_o, all_n_a, all_n
 
-    # _, _, _, mall_o, mall_n_a, _ = _process("Processing members", 'grch38', None, REPLACE_PROB)
-    # _, _, _, nall_o1, nall_n_a1, _ = _process("Evaluating non-members", 'vcf', "HG00096", REPLACE_PROB)
-    # _, _, _, nall_o2, nall_n_a2, _ = _process("Evaluating non-members", 'vcf', "HG00097", REPLACE_PROB)
+    _, _, _, mall_o, mall_n_a, _ = _process("Processing members", 'grch38', None, REPLACE_PROB)
+    _, _, _, nall_o1, nall_n_a1, _ = _process("Evaluating non-members", 'vcf', "HG00096", REPLACE_PROB)
+    _, _, _, nall_o2, nall_n_a2, _ = _process("Evaluating non-members", 'vcf', "HG00097", REPLACE_PROB)
 
     _, _, _, small_o, small_n_a, _ = _process("Processing members", 'grch38', None, REPLACE_PROB_2)
     _, _, _, snpall_o1, snpall_n_a1, _ = _process("Evaluating non-members", 'vcf', "HG00096", REPLACE_PROB_2)
@@ -194,7 +204,7 @@ def exp4(model, tokenizer, device):
 
 ##############################################################
 # ---------------------------------------------------------- #
-# EXPERIMENT EXECUTION
+# EXECUTION
 # ---------------------------------------------------------- #
 ##############################################################
 
@@ -203,11 +213,12 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"[STATUS] Using {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
 
-    model_hyena, tk_hyena = load_gfm_to_device('hyenadna', device)
+    # model_hyena, tk_hyena = load_gfm_to_device('hyenadna', device)
+    model_generator, tk_generator = load_gfm_to_device('generator', device)
 
     # exp1(model_hyena, tk_hyena, device) # Pure Loss-Based
     # exp2(model_hyena, tk_hyena, device) # Min-k% MIA
-    exp3(model_hyena, tk_hyena, device) # Neighborhood Comparison
+    exp3(model_generator, tk_generator, device) # Neighborhood Comparison
     # exp4(model_hyena, tk_hyena, device) # ReCall
 
 if __name__ == "__main__":

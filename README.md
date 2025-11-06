@@ -75,3 +75,6 @@ If we consider only model's loss on SNP positions, the difference between origin
 - attack and defense
 - before Jan. 2026
 - slides
+
+
+- unlearning # defense
