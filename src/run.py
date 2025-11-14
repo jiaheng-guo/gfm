@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from difflib import SequenceMatcher
 from tqdm import tqdm
 
 from eval import (
@@ -36,12 +35,6 @@ REPLACE_PROB_2 = [0.3, 0.4, 0.5]
 VCF_SAMPLES = ["HG00096", "HG00097"]
 VCF_PATH = "./data/ALL.chr1.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz"
 REF_PATH = "./data/Homo_sapiens.GRCh38.dna.chromosome.1.fa"
-EXP5_TARGET_REGIONS = 100
-EXP5_MAX_ATTEMPTS = 2000
-EXP7_NUM_SAMPLES = 50
-EXP7_PREFIX_LEN = 8000
-EXP7_POSTFIX_LEN = 512
-EXP7_SIMILARITY_THRESHOLD = 0.9
 
 ##############################################################
 # ---------------------------------------------------------- #
@@ -296,6 +289,9 @@ def exp4(model, tokenizer, device, sample_ids=None):
 # ---------------------------------------------------------- #
 ##############################################################
 
+EXP5_TARGET_REGIONS = 100
+EXP5_MAX_ATTEMPTS = 2000
+
 def exp5(
     model,
     tokenizer,
@@ -540,6 +536,13 @@ def exp6(model, tokenizer, device, probs=None, k_percent=0.2):
 # ---------------------------------------------------------- #
 ##############################################################
 
+from difflib import SequenceMatcher
+
+EXP7_NUM_SAMPLES = 50
+EXP7_PREFIX_LEN = 8000
+EXP7_POSTFIX_LEN = 512
+EXP7_SIMILARITY_THRESHOLD = 0.9
+
 def exp7(
     model,
     tokenizer,
@@ -604,7 +607,7 @@ def exp7(
     max_attempts = num_samples * 5
     chrom = CHROMOSOME_ID[0]
 
-    progress = tqdm(total=num_samples, desc="[exp7] prefix/postfix", unit="seq")
+    progress = tqdm(total=num_samples, desc="Prefix/Postfix Generation", unit="seq")
     while len(samples) < num_samples and attempts < max_attempts:
         start_idx = SEQ_START_IDX + attempts * SEQ_STRIDE
         end_idx = start_idx + total_len
