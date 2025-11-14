@@ -21,7 +21,7 @@ GPU: NVIDIA A100-SXM4-40GB
   - utils.py: non-genomic utility functions
   - run.py: main attack implementations
   - eval.py: evaluation functions
-- data/: genomic data files
+- data/: genomic data files (large, ignored in git)
 - static/: figures for README and result visualizations
 
 ### Numerical Results
@@ -76,5 +76,12 @@ If we consider only model's loss on SNP positions, the difference between origin
 - before Jan. 2026
 - slides
 
+## Genomic Foundation Model Configurations
+
+| Model Name | Vocab Size | Context Length | Param Size | Link |
+|------------|------------|----------------|------------|------|
+| HyenaDNA | 6 | 2048 | 1.3B |
+| GENERator | 4128 | 2048 | 2.5B |
+| Nucleotide Transformer | 6 | 2048 | 2.5B |
 
 - unlearning # defense

@@ -18,7 +18,7 @@ def load_gfm_to_device(model_name, device) -> tuple:
     (2) The pre-training dataset of
           (i) HyenaDNA is GRCh38,
          (ii) GENERator is RefSeq, and
-        (iii) Nucleotide Transformer is 1kG.
+        (iii) Nucleotide Transformer is 1000G.
 
     Parameters:
     ----------
@@ -149,13 +149,9 @@ def fetch_grch38_region(chrom, start, end) -> str:
 
     try:
         r = requests.get(server + ext + ver, headers=headers)
-        if r.ok:
-            return r.text.strip()
-        else:
-            print(f"Error: {r.status_code}")
-            return None
-
-    except Exception as e:
+        r.raise_for_status()
+        return r.text.strip()
+    except requests.RequestException as e:
         print(f"Error: {e}")
         return None
     
@@ -169,7 +165,10 @@ def is_clean_dna(seq: str):
     Verify if a sequence only contains A, T, C, G.
     """
     valid_nucleotides = set("ATGC")
-    return set(seq.upper()) <= valid_nucleotides
+    flag = set(seq.upper()) <= valid_nucleotides
+    if not flag:
+        print(f"WARNING: Missing nucleotides detected {set(seq.upper()) - valid_nucleotides}")
+    return flag
 
 
 ###############################################################
@@ -185,16 +184,30 @@ In this section, we define modules to deal with SNPs.
 def fetch_snps_in_region(chrom, start, end):
     """
     Fetch SNPs in a given genomic region from Ensembl REST API.
+    Adds error handling for network and HTTP errors.
     """
-
     url = f"https://rest.ensembl.org/overlap/region/human/{chrom}:{start}-{end}?feature=variation"
-
     headers = {"Content-Type": "application/json"}
-    response = requests.get(url, headers=headers)
 
-    snps = response.json()
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()  # Raises HTTPError if status >= 400
 
-    return snps
+        try:
+            snps = response.json()
+        except ValueError:
+            print(f"Error: Invalid JSON in response for {chrom}:{start}-{end}")
+            return None
+
+        if not snps:
+            print(f"No SNPs found in {chrom}:{start}-{end}")
+            return []
+
+        return snps
+
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed for {chrom}:{start}-{end}: {e}")
+        return None
 
 
 def create_variant_sequences(chrom, start, end, probs, dataset='grch38', sample="HG00096"):
@@ -233,10 +246,10 @@ def create_variant_sequences(chrom, start, end, probs, dataset='grch38', sample=
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
-    if ref_seq is None or not is_clean_dna(ref_seq):
-        return None
+    assert ref_seq is not None, "Failed to fetch reference sequence"
 
     snps = fetch_snps_in_region(chrom, start, end)
+    assert snps is not None, "Failed to fetch SNPs"
     res = {
         "ref_seq": ref_seq,
         "snp_pos": [],
