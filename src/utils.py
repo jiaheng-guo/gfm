@@ -216,6 +216,68 @@ def compute_loss_and_perplexity(seq, model, tokenizer, device):
     return loss.item(), perplexity.item()
 
 
+def compute_conditional_suffix_loss(
+    prefix_text: str,
+    target_seq: str,
+    model,
+    tokenizer,
+    device,
+):
+    """
+    Compute the mean loss of the target sequence tokens when
+    the model is conditioned on a prefix (non-member context).
+    """
+    if not isinstance(prefix_text, str) or not isinstance(target_seq, str):
+        raise ValueError("Prefix and target sequences must be strings.")
+
+    combined = prefix_text + target_seq
+    if not combined:
+        raise ValueError("Combined sequence is empty.")
+
+    model.eval()
+    inputs, offsets = _tokenize_with_optional_offsets(
+        combined,
+        tokenizer,
+        device,
+        need_offsets=True,
+    )
+    input_ids = inputs["input_ids"]
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    logits = outputs.logits
+    if logits.size(1) < 2:
+        raise ValueError("Sequence too short after tokenization.")
+
+    shift_logits = logits[:, :-1, :]
+    shift_labels = input_ids[:, 1:]
+    per_token_loss = F.cross_entropy(
+        shift_logits.reshape(-1, shift_logits.size(-1)),
+        shift_labels.reshape(-1),
+        reduction="none",
+    ).view(shift_labels.shape)
+
+    if offsets is None:
+        raise ValueError("Offsets required to isolate suffix tokens.")
+
+    label_offsets = offsets[1:]
+    prefix_len = len(prefix_text)
+    mask_values = [
+        (start is not None and start >= prefix_len)
+        for start, _ in label_offsets
+    ]
+    if not any(mask_values):
+        raise ValueError("No suffix tokens remain after applying prefix.")
+
+    mask = torch.tensor(mask_values, dtype=torch.bool, device=per_token_loss.device)
+    suffix_losses = per_token_loss[0][mask]
+    if suffix_losses.numel() == 0:
+        raise ValueError("Suffix token mask produced no elements.")
+
+    return suffix_losses.mean().item()
+
+
 def compute_snp_loss_and_perplexity(seq, snp_index, model, tokenizer, device):
     """
     Compute the mean loss and perplexity of SNP-affected tokens under a causal LM.

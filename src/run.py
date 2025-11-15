@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from matplotlib import pyplot as plt
 from tqdm import tqdm
 
 from eval import (
@@ -21,7 +22,9 @@ from utils import (
     compute_snp_loss_and_perplexity,
     compute_min_kpp_score,
     find_diff_positions,
+    compute_conditional_suffix_loss,
     visualize_loss_diff,
+    _tokenize_with_optional_offsets,
 )
 
 # Configs, temporarily defined here. Pay attention to SEQ_LENGTH
@@ -44,9 +47,29 @@ REF_PATH = "./data/Homo_sapiens.GRCh38.dna.chromosome.1.fa"
 
 def exp0(model, tokenizer, device):
     """
-    pass
+    In this experiment, we want to illustrate the distribution of genomic foundation model output logits, and what they look like after softmax, to give the reader an initial impression of this special domain and how it differs from natural language models.
     """
-    pass
+    model.eval()
+    with torch.no_grad():
+        # Generate a dummy input sequence
+        input_seq = "ACGT" * 2500  # 10,000 tokens
+        inputs, _ = _tokenize_with_optional_offsets(input_seq, tokenizer, device)
+
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        # Compute softmax probabilities
+        probs = logits.softmax(dim=-1)
+
+    # Visualize the distributions
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.title("Logits Distribution")
+    plt.hist(logits.cpu().numpy().flatten(), bins=100, alpha=0.7)
+    plt.subplot(1, 2, 2)
+    plt.title("Softmax Probabilities Distribution")
+    plt.hist(probs.cpu().numpy().flatten(), bins=100, alpha=0.7)
+    plt.show()
 
 ##############################################################
 # ---------------------------------------------------------- #
@@ -542,6 +565,11 @@ EXP7_NUM_SAMPLES = 50
 EXP7_PREFIX_LEN = 8000
 EXP7_POSTFIX_LEN = 512
 EXP7_SIMILARITY_THRESHOLD = 0.9
+EXP8_NUM_WINDOWS = 40
+EXP8_PREFIX_SHOTS = 4
+EXP8_PREFIX_SEG_LEN = 512
+EXP8_TARGET_LEN = 2048
+EXP8_SCORE_EPS = 1e-8
 
 def exp7(
     model,
@@ -677,6 +705,190 @@ def exp7(
 
     return samples
 
+
+##############################################################
+# ---------------------------------------------------------- #
+# [EXPERIMENT 8] RECALL-Style Conditional Likelihood
+# ---------------------------------------------------------- #
+##############################################################
+
+def exp8(
+    model,
+    tokenizer,
+    device,
+    num_windows=EXP8_NUM_WINDOWS,
+    prefix_shots=EXP8_PREFIX_SHOTS,
+    prefix_seg_len=EXP8_PREFIX_SEG_LEN,
+    target_len=EXP8_TARGET_LEN,
+    prefix_sample_ids=None,
+    eval_sample_ids=None,
+):
+    """
+    Implement a RECALL-style membership inference attack by
+    comparing conditional losses with and without a non-member prefix.
+    """
+    chrom = CHROMOSOME_ID[0]
+    prefix_samples = prefix_sample_ids or VCF_SAMPLES
+    eval_samples = eval_sample_ids or VCF_SAMPLES
+
+    if not prefix_samples:
+        raise ValueError("No samples provided for prefix construction.")
+    if not eval_samples:
+        raise ValueError("No evaluation samples provided for exp8.")
+
+    def _build_non_member_prefix():
+        segments = []
+        attempts = 0
+        max_attempts = prefix_shots * 10
+        stride = max(1, SEQ_STRIDE)
+        while len(segments) < prefix_shots and attempts < max_attempts:
+            start_idx = SEQ_START_IDX + attempts * stride
+            end_idx = start_idx + prefix_seg_len
+            if end_idx > SEQ_END_IDX:
+                break
+            sid = prefix_samples[len(segments) % len(prefix_samples)]
+            seq = reconstruct_sequence(
+                chrom=chrom,
+                start=start_idx,
+                end=end_idx,
+                sample=sid,
+                vcf_path=VCF_PATH,
+                ref_path=REF_PATH,
+            )
+            attempts += 1
+            if seq is None or len(seq) < prefix_seg_len:
+                continue
+            segments.append(seq[:prefix_seg_len])
+        return "".join(segments)
+
+    prefix_text = _build_non_member_prefix()
+    if not prefix_text:
+        print("[exp8] Failed to build non-member prefix; aborting.")
+        return
+    print(
+        f"[exp8] Prefix constructed with {prefix_shots} shots "
+        f"(length={len(prefix_text)}) from samples {prefix_samples}"
+    )
+
+    def _conditional_loss_with_adaptive_prefix(sequence):
+        nonlocal prefix_text
+        working_prefix = prefix_text
+        trimmed = False
+        while True:
+            try:
+                cond_loss = compute_conditional_suffix_loss(
+                    working_prefix,
+                    sequence,
+                    model,
+                    tokenizer,
+                    device,
+                )
+                if trimmed and working_prefix != prefix_text:
+                    print(f"[exp8] Trimmed prefix length to {len(working_prefix)} to fit context.")
+                prefix_text = working_prefix
+                return cond_loss
+            except ValueError as err:
+                err_msg = str(err)
+                needs_trim = (
+                    "No suffix tokens remain" in err_msg
+                    or "Suffix token mask produced no elements" in err_msg
+                )
+                if needs_trim and working_prefix:
+                    trim_chars = max(1, len(working_prefix) // 2)
+                    working_prefix = working_prefix[trim_chars:]
+                    trimmed = True
+                    continue
+                raise
+
+    member_scores = []
+    non_member_scores = {sid: [] for sid in eval_samples}
+
+    windows_used = 0
+    attempts = 0
+    max_attempts = num_windows * 5
+    pbar = tqdm(total=num_windows, desc="RECALL exp8", unit="window")
+
+    while windows_used < num_windows and attempts < max_attempts:
+        start_idx = SEQ_START_IDX + attempts * SEQ_STRIDE
+        end_idx = start_idx + target_len
+        attempts += 1
+
+        if end_idx > SEQ_END_IDX:
+            break
+
+        ref_seq = fetch_grch38_region(chrom, start_idx, end_idx)
+        if ref_seq is None or len(ref_seq) < target_len:
+            continue
+
+        try:
+            loss_member, _ = compute_loss_and_perplexity(ref_seq, model, tokenizer, device)
+            cond_member = _conditional_loss_with_adaptive_prefix(ref_seq)
+        except ValueError as err:
+            print(f"[exp8][WARN] Skipping member window ({start_idx}-{end_idx}): {err}")
+            continue
+
+        ratio_member = cond_member / max(loss_member, EXP8_SCORE_EPS)
+        member_scores.append(ratio_member)
+
+        for sid in eval_samples:
+            seq_ind = reconstruct_sequence(
+                chrom=chrom,
+                start=start_idx,
+                end=end_idx,
+                sample=sid,
+                vcf_path=VCF_PATH,
+                ref_path=REF_PATH,
+            )
+            if seq_ind is None or len(seq_ind) < target_len:
+                continue
+            try:
+                loss_nm, _ = compute_loss_and_perplexity(seq_ind, model, tokenizer, device)
+                cond_nm = _conditional_loss_with_adaptive_prefix(seq_ind)
+            except ValueError:
+                continue
+            ratio_nm = cond_nm / max(loss_nm, EXP8_SCORE_EPS)
+            non_member_scores[sid].append(ratio_nm)
+
+        windows_used += 1
+        pbar.update(1)
+
+    pbar.close()
+
+    flat_non_members = [score for scores in non_member_scores.values() for score in scores]
+    if not member_scores or not flat_non_members:
+        print("[exp8] Not enough sequences processed for RECALL scoring.")
+        return
+
+    mean_member = np.mean(member_scores)
+    mean_non_member = np.mean(flat_non_members)
+    print(
+        f"[exp8] Windows processed: {windows_used} "
+        f"(attempted {attempts}, chrom {chrom})"
+    )
+    print(
+        f"[exp8] Member mean score={mean_member:.4f} | "
+        f"Non-member mean score={mean_non_member:.4f} | "
+        f"Gap={mean_member - mean_non_member:.4f}"
+    )
+    for sid, scores in non_member_scores.items():
+        if scores:
+            print(f"  [Non-member {sid}] mean={np.mean(scores):.4f}, n={len(scores)}")
+
+    labels = np.array([1] * len(member_scores) + [0] * len(flat_non_members))
+    scores = np.array(member_scores + flat_non_members)
+    try:
+        auc = roc_auc_score(labels, scores)
+    except ValueError:
+        auc = float("nan")
+    print(f"[exp8] AUC={auc:.4f}")
+
+    return {
+        "prefix_len": len(prefix_text),
+        "member_scores": member_scores,
+        "non_member_scores": non_member_scores,
+        "auc": auc,
+    }
+
 ##############################################################
 # ---------------------------------------------------------- #
 # EXECUTION
@@ -699,15 +911,24 @@ def main():
     # exp5(model_hyena, tk_hyena, device, k_percent=0.2) # Min-K%++ @ SNP tokens
     # exp5(model_generator, tk_generator, device, k_percent=0.2) # Min-K%++ @ SNP tokens
     # exp6(model_hyena, tk_hyena, device) # SNP neighbors with Min-K%++
-    exp7(
+    # exp7(
+    #     model_generator,
+    #     tk_generator,
+    #     device,
+    #     num_samples=EXP7_NUM_SAMPLES,
+    #     prefix_len=EXP7_PREFIX_LEN,
+    #     postfix_len=EXP7_POSTFIX_LEN,
+    #     similarity_threshold=EXP7_SIMILARITY_THRESHOLD,
+    #     temperature=1.0,
+    # )
+    exp8(
         model_generator,
         tk_generator,
         device,
-        num_samples=EXP7_NUM_SAMPLES,
-        prefix_len=EXP7_PREFIX_LEN,
-        postfix_len=EXP7_POSTFIX_LEN,
-        similarity_threshold=EXP7_SIMILARITY_THRESHOLD,
-        temperature=1.0,
+        num_windows=EXP8_NUM_WINDOWS,
+        prefix_shots=EXP8_PREFIX_SHOTS,
+        prefix_seg_len=EXP8_PREFIX_SEG_LEN,
+        target_len=EXP8_TARGET_LEN,
     )
 
 if __name__ == "__main__":
