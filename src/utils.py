@@ -290,6 +290,37 @@ def compute_conditional_suffix_loss(
     return suffix_losses.mean().item()
 
 
+def compute_dropout_loss(
+    seq,
+    model,
+    tokenizer,
+    device,
+    num_masks=5,
+):
+    """
+    Estimate the expected loss when randomly masking layers (via dropout)
+    by enabling train mode and running multiple stochastic forward passes.
+    """
+    if num_masks <= 0:
+        raise ValueError("num_masks must be positive.")
+
+    was_training = model.training
+    model.train()
+
+    inputs, _ = _tokenize_with_optional_offsets(seq, tokenizer, device, need_offsets=False)
+    losses = []
+
+    with torch.no_grad():
+        for _ in range(num_masks):
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            losses.append(outputs.loss.item())
+
+    if not was_training:
+        model.eval()
+
+    return float(np.mean(losses)), float(np.var(losses))
+
+
 def compute_snp_loss_and_perplexity(seq, snp_index, model, tokenizer, device):
     """
     Compute the mean loss and perplexity of SNP-affected tokens under a causal LM.

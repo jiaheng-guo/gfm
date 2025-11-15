@@ -23,6 +23,7 @@ from utils import (
     compute_min_kpp_score,
     find_diff_positions,
     compute_conditional_suffix_loss,
+    compute_dropout_loss,
     visualize_loss_diff,
     _tokenize_with_optional_offsets,
 )
@@ -736,50 +737,9 @@ def exp8(
     if not eval_samples:
         raise ValueError("No evaluation samples provided for exp8.")
 
-    def _build_non_member_prefix():
-        segments = []
-        attempts = 0
-        stride = max(1, SEQ_STRIDE)
-        min_segments = max(1, prefix_min_len // max(1, stride))
-        max_segments = max(min_segments, prefix_max_len // max(1, stride))
-        target_segments = max_segments
-        max_attempts = target_segments * 10
-
-        while len(segments) < target_segments and attempts < max_attempts:
-            start_idx = SEQ_START_IDX + attempts * stride
-            end_idx = start_idx + stride
-            if end_idx > SEQ_END_IDX:
-                break
-            sid = prefix_samples[attempts % len(prefix_samples)]
-            seq = reconstruct_sequence(
-                chrom=chrom,
-                start=start_idx,
-                end=end_idx,
-                sample=sid,
-                vcf_path=VCF_PATH,
-                ref_path=REF_PATH,
-            )
-            attempts += 1
-            if seq is None or len(seq) < stride:
-                continue
-            segments.append(seq[:stride])
-
-        prefix = "".join(segments)
-        if len(prefix) < prefix_min_len:
-            return ""
-        return prefix[: prefix_max_len]
-
-    prefix_text = _build_non_member_prefix()
-    if not prefix_text:
-        print("[exp8] Failed to build non-member prefix; aborting.")
-        return
-    print(
-        f"[exp8] Prefix constructed (length={len(prefix_text)} bases, "
-        f"min={prefix_min_len}, max={prefix_max_len}) from samples {prefix_samples}"
-    )
-
-    def _conditional_loss_with_adaptive_prefix(sequence, snp_positions=None):
-        nonlocal prefix_text
+    def _conditional_loss_with_adaptive_prefix(prefix_text, sequence, snp_positions=None):
+        if not prefix_text:
+            raise ValueError("Empty prefix text for conditional loss.")
         working_prefix = prefix_text
         trimmed = False
         while True:
@@ -793,8 +753,7 @@ def exp8(
                     position_indices=snp_positions,
                 )
                 if trimmed and working_prefix != prefix_text:
-                    print(f"Trimmed prefix length to {len(working_prefix)} to fit context.")
-                prefix_text = working_prefix
+                    print(f"[exp8] Trimmed prefix length to {len(working_prefix)} to fit context.")
                 return cond_loss
             except ValueError as err:
                 err_msg = str(err)
@@ -811,6 +770,7 @@ def exp8(
 
     member_scores = []
     non_member_scores = {sid: [] for sid in eval_samples}
+    prefix_length_log = []
 
     windows_used = 0
     attempts = 0
@@ -824,6 +784,25 @@ def exp8(
 
         if end_idx > SEQ_END_IDX:
             break
+
+        available_prefix = start_idx - max(SEQ_START_IDX, 1)
+        max_prefix_here = min(prefix_max_len, available_prefix)
+        if max_prefix_here < prefix_min_len:
+            continue
+        prefix_len = max_prefix_here
+        prefix_start = start_idx - prefix_len
+        prefix_sample = prefix_samples[attempts % len(prefix_samples)]
+        prefix_seq = reconstruct_sequence(
+            chrom=chrom,
+            start=prefix_start,
+            end=start_idx,
+            sample=prefix_sample,
+            vcf_path=VCF_PATH,
+            ref_path=REF_PATH,
+        )
+        if prefix_seq is None or len(prefix_seq) < prefix_len:
+            continue
+        prefix_length_log.append(len(prefix_seq))
 
         ref_seq = fetch_grch38_region(chrom, start_idx, end_idx)
         if ref_seq is None or len(ref_seq) < target_len:
@@ -843,11 +822,12 @@ def exp8(
         try:
             loss_member, _ = compute_snp_loss_and_perplexity(ref_seq, snp_positions, model, tokenizer, device)
             cond_member = _conditional_loss_with_adaptive_prefix(
+                prefix_seq,
                 ref_seq,
                 snp_positions=snp_positions,
             )
         except ValueError as err:
-            print(f"[exp8][WARN] Skipping member window ({start_idx}-{end_idx}): {err}")
+            print(f"[WARN] Skipping member window ({start_idx}-{end_idx}): {err}")
             continue
 
         diff_member = abs(cond_member - loss_member)
@@ -867,6 +847,7 @@ def exp8(
             try:
                 loss_nm, _ = compute_snp_loss_and_perplexity(seq_ind, snp_positions, model, tokenizer, device)
                 cond_nm = _conditional_loss_with_adaptive_prefix(
+                    prefix_seq,
                     seq_ind,
                     snp_positions=snp_positions,
                 )
@@ -879,6 +860,12 @@ def exp8(
         pbar.update(1)
 
     pbar.close()
+
+    if prefix_length_log:
+        print(
+            f"[exp8] Prefix lengths (bases): mean={np.mean(prefix_length_log):.1f}, "
+            f"min={min(prefix_length_log)}, max={max(prefix_length_log)}"
+        )
 
     flat_non_members = [score for scores in non_member_scores.values() for score in scores]
     if not member_scores or not flat_non_members:
@@ -909,7 +896,118 @@ def exp8(
     print(f"AUC={auc:.4f}")
 
     return {
-        "prefix_len": len(prefix_text),
+        "prefix_lengths": prefix_length_log,
+        "member_scores": member_scores,
+        "non_member_scores": non_member_scores,
+        "auc": auc,
+    }
+
+
+##############################################################
+# ---------------------------------------------------------- #
+# [EXPERIMENT 9] Stochastic Layer Masking MIA
+# ---------------------------------------------------------- #
+##############################################################
+
+EXP9_NUM_WINDOWS = 60
+EXP9_TARGET_LEN = 2048
+EXP9_NUM_MASKS = 6
+
+def exp9(
+    model,
+    tokenizer,
+    device,
+    num_windows=EXP9_NUM_WINDOWS,
+    target_len=EXP9_TARGET_LEN,
+    num_masks=EXP9_NUM_MASKS,
+    sample_ids=None,
+):
+    """
+    Membership inference via stochastic layer masking (dropout-based)
+    per Nasr et al. 2023: compare baseline losses to losses under random
+    layer masking (dropout enabled) and use the sensitivity gap as the score.
+    """
+    chrom = CHROMOSOME_ID[0]
+    samples = sample_ids or VCF_SAMPLES
+
+    member_scores = []
+    non_member_scores = {sid: [] for sid in samples}
+
+    windows_used = 0
+    attempts = 0
+    max_attempts = num_windows * 5
+    pbar = tqdm(total=num_windows, desc="Stochastic Layer Masking", unit="window")
+
+    while windows_used < num_windows and attempts < max_attempts:
+        start_idx = SEQ_START_IDX + attempts * SEQ_STRIDE
+        end_idx = start_idx + target_len
+        attempts += 1
+
+        if end_idx > SEQ_END_IDX:
+            break
+
+        ref_seq = fetch_grch38_region(chrom, start_idx, end_idx)
+        if ref_seq is None or len(ref_seq) < target_len:
+            continue
+
+        base_loss, _ = compute_loss_and_perplexity(ref_seq, model, tokenizer, device)
+        mask_loss_mean, _ = compute_dropout_loss(
+            ref_seq, model, tokenizer, device, num_masks=num_masks
+        )
+
+        member_scores.append(mask_loss_mean - base_loss)
+
+        for sid in samples:
+            seq_ind = reconstruct_sequence(
+                chrom=chrom,
+                start=start_idx,
+                end=end_idx,
+                sample=sid,
+                vcf_path=VCF_PATH,
+                ref_path=REF_PATH,
+            )
+            if seq_ind is None or len(seq_ind) < target_len:
+                continue
+            base_nm, _ = compute_loss_and_perplexity(seq_ind, model, tokenizer, device)
+            mask_nm, _ = compute_dropout_loss(
+                seq_ind, model, tokenizer, device, num_masks=num_masks
+            )
+            non_member_scores[sid].append(mask_nm - base_nm)
+
+        windows_used += 1
+        pbar.update(1)
+
+    pbar.close()
+
+    flat_non_members = [score for scores in non_member_scores.values() for score in scores]
+    if not member_scores or not flat_non_members:
+        print("[exp9] Not enough sequences processed for stochastic masking MIA.")
+        return
+
+    mean_member = np.mean(member_scores)
+    mean_non_member = np.mean(flat_non_members)
+    print(
+        f"[exp9] Windows processed: {windows_used} "
+        f"(attempted {attempts}, chrom {chrom})"
+    )
+    print(
+        f"[exp9] Member mean score={mean_member:.4f} | "
+        f"Non-member mean score={mean_non_member:.4f} | "
+        f"Gap={mean_member - mean_non_member:.4f}"
+    )
+    for sid, scores in non_member_scores.items():
+        if scores:
+            print(f"  [Non-member {sid}] mean={np.mean(scores):.4f}, n={len(scores)}")
+
+    labels = np.array([1] * len(member_scores) + [0] * len(flat_non_members))
+    scores = np.array(member_scores + flat_non_members)
+    try:
+        auc = roc_auc_score(labels, scores)
+    except ValueError:
+        auc = float("nan")
+    print(f"[exp9] AUC={auc:.4f}")
+
+    return {
         "member_scores": member_scores,
         "non_member_scores": non_member_scores,
         "auc": auc,
@@ -926,8 +1024,8 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"[DEVICE STATUS] Using {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
 
-    # model_hyena, tk_hyena = load_gfm_to_device('hyenadna', device)
-    model_generator, tk_generator = load_gfm_to_device('generator', device)
+    model_hyena, tk_hyena = load_gfm_to_device('hyenadna', device)
+    # model_generator, tk_generator = load_gfm_to_device('generator', device)
 
     # exp1(model_hyena, tk_hyena, device) # Pure Loss-Based
     # exp2(model_hyena, tk_hyena, device) # Min-k% MIA
@@ -947,14 +1045,22 @@ def main():
     #     similarity_threshold=EXP7_SIMILARITY_THRESHOLD,
     #     temperature=1.0,
     # ) # Prefix-Postfix Extraction
-    exp8(
-        model_generator,
-        tk_generator,
+    # exp8(
+    #     model_hyena,
+    #     tk_hyena,
+    #     device,
+    #     num_windows=EXP8_NUM_WINDOWS,
+    #     prefix_min_len=EXP8_PREFIX_MIN_LEN,
+    #     prefix_max_len=EXP8_PREFIX_MAX_LEN,
+    #     target_len=EXP8_TARGET_LEN,
+    # )
+    exp9(
+        model_hyena,
+        tk_hyena,
         device,
-        num_windows=EXP8_NUM_WINDOWS,
-        prefix_min_len=EXP8_PREFIX_MIN_LEN,
-        prefix_max_len=EXP8_PREFIX_MAX_LEN,
-        target_len=EXP8_TARGET_LEN,
+        num_windows=EXP9_NUM_WINDOWS,
+        target_len=EXP9_TARGET_LEN,
+        num_masks=EXP9_NUM_MASKS,
     )
 
 if __name__ == "__main__":
