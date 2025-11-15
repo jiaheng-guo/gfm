@@ -222,6 +222,7 @@ def compute_conditional_suffix_loss(
     model,
     tokenizer,
     device,
+    position_indices=None,
 ):
     """
     Compute the mean loss of the target sequence tokens when
@@ -263,17 +264,28 @@ def compute_conditional_suffix_loss(
 
     label_offsets = offsets[1:]
     prefix_len = len(prefix_text)
-    mask_values = [
+    base_mask_values = [
         (start is not None and start >= prefix_len)
         for start, _ in label_offsets
     ]
-    if not any(mask_values):
+    if not any(base_mask_values):
         raise ValueError("No suffix tokens remain after applying prefix.")
 
-    mask = torch.tensor(mask_values, dtype=torch.bool, device=per_token_loss.device)
+    mask = torch.tensor(base_mask_values, dtype=torch.bool, device=per_token_loss.device)
+
+    if position_indices is not None:
+        token_indices = _map_bases_to_token_indices(label_offsets, position_indices, shifted=False)
+        if not token_indices:
+            raise ValueError("Provided SNP positions do not map to tokenizer offsets.")
+        snp_mask = torch.zeros_like(mask)
+        for idx in token_indices:
+            if 0 <= idx < snp_mask.numel():
+                snp_mask[idx] = True
+        mask = mask & snp_mask
+
     suffix_losses = per_token_loss[0][mask]
     if suffix_losses.numel() == 0:
-        raise ValueError("Suffix token mask produced no elements.")
+        raise ValueError("Suffix token mask produced no elements after SNP filtering.")
 
     return suffix_losses.mean().item()
 

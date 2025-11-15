@@ -565,11 +565,6 @@ EXP7_NUM_SAMPLES = 50
 EXP7_PREFIX_LEN = 8000
 EXP7_POSTFIX_LEN = 512
 EXP7_SIMILARITY_THRESHOLD = 0.9
-EXP8_NUM_WINDOWS = 40
-EXP8_PREFIX_SHOTS = 4
-EXP8_PREFIX_SEG_LEN = 512
-EXP8_TARGET_LEN = 2048
-EXP8_SCORE_EPS = 1e-8
 
 def exp7(
     model,
@@ -635,7 +630,7 @@ def exp7(
     max_attempts = num_samples * 5
     chrom = CHROMOSOME_ID[0]
 
-    progress = tqdm(total=num_samples, desc="Prefix/Postfix Generation", unit="seq")
+    progress = tqdm(total=num_samples, desc="Prefix/Postfix Generation")
     while len(samples) < num_samples and attempts < max_attempts:
         start_idx = SEQ_START_IDX + attempts * SEQ_STRIDE
         end_idx = start_idx + total_len
@@ -712,20 +707,25 @@ def exp7(
 # ---------------------------------------------------------- #
 ##############################################################
 
+EXP8_NUM_WINDOWS = 40
+EXP8_PREFIX_MIN_LEN = 1000
+EXP8_PREFIX_MAX_LEN = 10000
+EXP8_TARGET_LEN = 2048
+EXP8_SCORE_EPS = 1e-8
+
 def exp8(
     model,
     tokenizer,
     device,
     num_windows=EXP8_NUM_WINDOWS,
-    prefix_shots=EXP8_PREFIX_SHOTS,
-    prefix_seg_len=EXP8_PREFIX_SEG_LEN,
+    prefix_min_len=EXP8_PREFIX_MIN_LEN,
+    prefix_max_len=EXP8_PREFIX_MAX_LEN,
     target_len=EXP8_TARGET_LEN,
     prefix_sample_ids=None,
     eval_sample_ids=None,
 ):
     """
-    Implement a RECALL-style membership inference attack by
-    comparing conditional losses with and without a non-member prefix.
+    Implement a ReCall-style MIA by comparing conditional losses with and without a non-member prefix.
     """
     chrom = CHROMOSOME_ID[0]
     prefix_samples = prefix_sample_ids or VCF_SAMPLES
@@ -739,14 +739,18 @@ def exp8(
     def _build_non_member_prefix():
         segments = []
         attempts = 0
-        max_attempts = prefix_shots * 10
         stride = max(1, SEQ_STRIDE)
-        while len(segments) < prefix_shots and attempts < max_attempts:
+        min_segments = max(1, prefix_min_len // max(1, stride))
+        max_segments = max(min_segments, prefix_max_len // max(1, stride))
+        target_segments = max_segments
+        max_attempts = target_segments * 10
+
+        while len(segments) < target_segments and attempts < max_attempts:
             start_idx = SEQ_START_IDX + attempts * stride
-            end_idx = start_idx + prefix_seg_len
+            end_idx = start_idx + stride
             if end_idx > SEQ_END_IDX:
                 break
-            sid = prefix_samples[len(segments) % len(prefix_samples)]
+            sid = prefix_samples[attempts % len(prefix_samples)]
             seq = reconstruct_sequence(
                 chrom=chrom,
                 start=start_idx,
@@ -756,21 +760,25 @@ def exp8(
                 ref_path=REF_PATH,
             )
             attempts += 1
-            if seq is None or len(seq) < prefix_seg_len:
+            if seq is None or len(seq) < stride:
                 continue
-            segments.append(seq[:prefix_seg_len])
-        return "".join(segments)
+            segments.append(seq[:stride])
+
+        prefix = "".join(segments)
+        if len(prefix) < prefix_min_len:
+            return ""
+        return prefix[: prefix_max_len]
 
     prefix_text = _build_non_member_prefix()
     if not prefix_text:
         print("[exp8] Failed to build non-member prefix; aborting.")
         return
     print(
-        f"[exp8] Prefix constructed with {prefix_shots} shots "
-        f"(length={len(prefix_text)}) from samples {prefix_samples}"
+        f"[exp8] Prefix constructed (length={len(prefix_text)} bases, "
+        f"min={prefix_min_len}, max={prefix_max_len}) from samples {prefix_samples}"
     )
 
-    def _conditional_loss_with_adaptive_prefix(sequence):
+    def _conditional_loss_with_adaptive_prefix(sequence, snp_positions=None):
         nonlocal prefix_text
         working_prefix = prefix_text
         trimmed = False
@@ -782,9 +790,10 @@ def exp8(
                     model,
                     tokenizer,
                     device,
+                    position_indices=snp_positions,
                 )
                 if trimmed and working_prefix != prefix_text:
-                    print(f"[exp8] Trimmed prefix length to {len(working_prefix)} to fit context.")
+                    print(f"Trimmed prefix length to {len(working_prefix)} to fit context.")
                 prefix_text = working_prefix
                 return cond_loss
             except ValueError as err:
@@ -806,7 +815,7 @@ def exp8(
     windows_used = 0
     attempts = 0
     max_attempts = num_windows * 5
-    pbar = tqdm(total=num_windows, desc="RECALL exp8", unit="window")
+    pbar = tqdm(total=num_windows, desc="RECALL SNP-only", unit="window")
 
     while windows_used < num_windows and attempts < max_attempts:
         start_idx = SEQ_START_IDX + attempts * SEQ_STRIDE
@@ -820,15 +829,29 @@ def exp8(
         if ref_seq is None or len(ref_seq) < target_len:
             continue
 
+        snps = fetch_snps_in_region(chrom, start_idx, end_idx)
+        snp_positions = []
+        for snp in snps:
+            if snp.get("start") != snp.get("end"):
+                continue
+            pos = snp["start"] - start_idx
+            if 0 <= pos < len(ref_seq):
+                snp_positions.append(pos)
+        if not snp_positions:
+            continue
+
         try:
-            loss_member, _ = compute_loss_and_perplexity(ref_seq, model, tokenizer, device)
-            cond_member = _conditional_loss_with_adaptive_prefix(ref_seq)
+            loss_member, _ = compute_snp_loss_and_perplexity(ref_seq, snp_positions, model, tokenizer, device)
+            cond_member = _conditional_loss_with_adaptive_prefix(
+                ref_seq,
+                snp_positions=snp_positions,
+            )
         except ValueError as err:
             print(f"[exp8][WARN] Skipping member window ({start_idx}-{end_idx}): {err}")
             continue
 
-        ratio_member = cond_member / max(loss_member, EXP8_SCORE_EPS)
-        member_scores.append(ratio_member)
+        diff_member = abs(cond_member - loss_member)
+        member_scores.append(diff_member)
 
         for sid in eval_samples:
             seq_ind = reconstruct_sequence(
@@ -842,12 +865,15 @@ def exp8(
             if seq_ind is None or len(seq_ind) < target_len:
                 continue
             try:
-                loss_nm, _ = compute_loss_and_perplexity(seq_ind, model, tokenizer, device)
-                cond_nm = _conditional_loss_with_adaptive_prefix(seq_ind)
+                loss_nm, _ = compute_snp_loss_and_perplexity(seq_ind, snp_positions, model, tokenizer, device)
+                cond_nm = _conditional_loss_with_adaptive_prefix(
+                    seq_ind,
+                    snp_positions=snp_positions,
+                )
             except ValueError:
                 continue
-            ratio_nm = cond_nm / max(loss_nm, EXP8_SCORE_EPS)
-            non_member_scores[sid].append(ratio_nm)
+            diff_nm = abs(cond_nm - loss_nm)
+            non_member_scores[sid].append(diff_nm)
 
         windows_used += 1
         pbar.update(1)
@@ -856,17 +882,17 @@ def exp8(
 
     flat_non_members = [score for scores in non_member_scores.values() for score in scores]
     if not member_scores or not flat_non_members:
-        print("[exp8] Not enough sequences processed for RECALL scoring.")
+        print("Not enough sequences processed for RECALL scoring.")
         return
 
     mean_member = np.mean(member_scores)
     mean_non_member = np.mean(flat_non_members)
     print(
-        f"[exp8] Windows processed: {windows_used} "
+        f"Windows processed: {windows_used} "
         f"(attempted {attempts}, chrom {chrom})"
     )
     print(
-        f"[exp8] Member mean score={mean_member:.4f} | "
+        f"Member mean score={mean_member:.4f} | "
         f"Non-member mean score={mean_non_member:.4f} | "
         f"Gap={mean_member - mean_non_member:.4f}"
     )
@@ -880,7 +906,7 @@ def exp8(
         auc = roc_auc_score(labels, scores)
     except ValueError:
         auc = float("nan")
-    print(f"[exp8] AUC={auc:.4f}")
+    print(f"AUC={auc:.4f}")
 
     return {
         "prefix_len": len(prefix_text),
@@ -920,14 +946,14 @@ def main():
     #     postfix_len=EXP7_POSTFIX_LEN,
     #     similarity_threshold=EXP7_SIMILARITY_THRESHOLD,
     #     temperature=1.0,
-    # )
+    # ) # Prefix-Postfix Extraction
     exp8(
         model_generator,
         tk_generator,
         device,
         num_windows=EXP8_NUM_WINDOWS,
-        prefix_shots=EXP8_PREFIX_SHOTS,
-        prefix_seg_len=EXP8_PREFIX_SEG_LEN,
+        prefix_min_len=EXP8_PREFIX_MIN_LEN,
+        prefix_max_len=EXP8_PREFIX_MAX_LEN,
         target_len=EXP8_TARGET_LEN,
     )
 
