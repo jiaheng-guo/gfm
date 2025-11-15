@@ -46,31 +46,62 @@ REF_PATH = "./data/Homo_sapiens.GRCh38.dna.chromosome.1.fa"
 # ---------------------------------------------------------- #
 ##############################################################
 
-def exp0(model, tokenizer, device):
+def exp0(model, tokenizer, device, steps=32, context_len=512):
     """
-    In this experiment, we want to illustrate the distribution of genomic foundation model output logits, and what they look like after softmax, to give the reader an initial impression of this special domain and how it differs from natural language models.
+    Inspect the generation dynamics of a GFM by sampling tokens and plotting:
+    1) Vocabulary probabilities for a base prompt.
+    2) Position-by-position token distribution across a generation trace.
+    3) Entropy per step, to highlight degeneracy (e.g., all 'T's).
     """
     model.eval()
+    base_prompt = "ACGT" * (context_len // 4)
+    inputs, _ = _tokenize_with_optional_offsets(base_prompt, tokenizer, device)
+
     with torch.no_grad():
-        # Generate a dummy input sequence
-        input_seq = "ACGT" * 2500  # 10,000 tokens
-        inputs, _ = _tokenize_with_optional_offsets(input_seq, tokenizer, device)
-
         outputs = model(**inputs)
-        logits = outputs.logits
+    logits = outputs.logits[0, -1, :].detach().cpu().numpy()
+    probs = torch.softmax(outputs, dim=-1).cpu().numpy()
 
-        # Compute softmax probabilities
-        probs = logits.softmax(dim=-1)
+    vocab_tokens = tokenizer.convert_ids_to_tokens(range(len(probs)))
+    nuc_probs = []
+    nuc_labels = ["A", "C", "G", "T"]
+    for nuc in nuc_labels:
+        idx = tokenizer.convert_tokens_to_ids(nuc)
+        nuc_probs.append(probs[idx] if idx is not None else 0.0)
 
-    # Visualize the distributions
-    plt.figure(figsize=(12, 6))
+    generated_tokens = []
+    entropies = []
+    input_ids = inputs["input_ids"].clone()
+    for _ in range(steps):
+        with torch.no_grad():
+            out = model(input_ids)
+            next_logits = out.logits[:, -1, :]
+            next_probs = torch.softmax(next_logits, dim=-1)
+        entropy = -torch.sum(next_probs * torch.log(next_probs + 1e-12), dim=-1)
+        entropies.append(entropy.item())
+        next_token = torch.argmax(next_probs, dim=-1)
+        generated_tokens.append(next_token.item())
+        input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+
+    generated_tokens = tokenizer.convert_ids_to_tokens(generated_tokens)
+
+    plt.figure(figsize=(14, 6))
     plt.subplot(1, 2, 1)
-    plt.title("Logits Distribution")
-    plt.hist(logits.cpu().numpy().flatten(), bins=100, alpha=0.7)
+    plt.bar(nuc_labels, nuc_probs, color="orange")
+    plt.title("Base Prompt: Probability of Nucleotides")
+    plt.ylabel("Probability")
+
     plt.subplot(1, 2, 2)
-    plt.title("Softmax Probabilities Distribution")
-    plt.hist(probs.cpu().numpy().flatten(), bins=100, alpha=0.7)
+    plt.plot(entropies, label="Entropy")
+    plt.title("Per-step Entropy during Generation")
+    plt.xlabel("Generation Step")
+    plt.ylabel("Entropy (nats)")
+    plt.legend()
+    plt.suptitle("Generation Dynamics (watch for entropy collapse)")
+    plt.tight_layout()
     plt.show()
+
+    print("[exp0] Generated tokens:", "".join(generated_tokens))
 
 ##############################################################
 # ---------------------------------------------------------- #
@@ -1025,7 +1056,7 @@ def main():
     print(f"[DEVICE STATUS] Using {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
 
     model_hyena, tk_hyena = load_gfm_to_device('hyenadna', device)
-    # model_generator, tk_generator = load_gfm_to_device('generator', device)
+    model_generator, tk_generator = load_gfm_to_device('generator', device)
 
     # exp1(model_hyena, tk_hyena, device) # Pure Loss-Based
     # exp2(model_hyena, tk_hyena, device) # Min-k% MIA
